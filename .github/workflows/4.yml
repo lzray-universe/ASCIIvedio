@@ -1,39 +1,101 @@
-name: build-asciiplay-windows-portable-fast
+name: build-asciiplay-windows-gcc-portable
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-win:
+  build-win-gcc:
     runs-on: windows-2022
     defaults:
       run:
-        shell: pwsh
+        shell: msys2 {0}   # 关键：让后续步骤在 MSYS2/MINGW64 下跑
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download prebuilt FFmpeg (full shared + dev)
+      - name: Set up MSYS2 (MINGW64) with GCC, CMake, Ninja, FFmpeg, ntldd, zip
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          msystem: MINGW64
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-ffmpeg
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-ntldd
+            zip
+
+      - name: Print toolchain versions
         run: |
-          $ErrorActionPreference = "Stop"
-          $FFROOT = "C:\ffmpeg"
-          New-Item -Force -ItemType Directory -Path $FFROOT | Out-Null
-          $Url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z"
-          $Dst = "$FFROOT\ffmpeg.7z"
-          Invoke-WebRequest $Url -OutFile $Dst
+          g++ --version
+          cmake --version
+          ninja --version
+          pkg-config --modversion libavformat libavcodec libavutil libswscale libswresample || true
 
-          $SevenZip = "C:\Program Files\7-Zip\7z.exe"
-          if (-not (Test-Path $SevenZip)) {
-            choco install -y 7zip
-            $SevenZip = "C:\Program Files\7-Zip\7z.exe"
-          }
-          & "$SevenZip" x $Dst -o"$FFROOT" -y
+      - name: Configure (GCC + Ninja; use MSYS2 FFmpeg)
+        working-directory: ./asciiplay
+        run: |
+          set -euxo pipefail
+          cmake -S . -B build -G "Ninja" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_STANDARD=17 \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_CXX_EXTENSIONS=OFF \
+            -DFFMPEG_INCLUDE_DIR=/mingw64/include \
+            -DFFMPEG_AVFORMAT_LIBRARY=/mingw64/lib/libavformat.dll.a \
+            -DFFMPEG_AVCODEC_LIBRARY=/mingw64/lib/libavcodec.dll.a \
+            -DFFMPEG_AVUTIL_LIBRARY=/mingw64/lib/libavutil.dll.a \
+            -DFFMPEG_SWSCALE_LIBRARY=/mingw64/lib/libswscale.dll.a \
+            -DFFMPEG_SWRESAMPLE_LIBRARY=/mingw64/lib/libswresample.dll.a
 
-          $Sub = Get-ChildItem -Directory $FFROOT | Where-Object { $_.Name -like "ffmpeg-*-full_build-shared*" } | Select-Object -First 1
-          if (-not $Sub) { throw "FFmpeg folder not found under $FFROOT" }
+      - name: Build (Release, GCC)
+        working-directory: ./asciiplay
+        run: cmake --build build --config Release -- -v
 
+      - name: Bundle portable zip (exe + all dependent DLLs)
+        working-directory: ./asciiplay
+        run: |
+          set -euxo pipefail
+          dist="$PWD/dist"
+          bin="$dist/bin"
+          mkdir -p "$bin"
+
+          exe="$PWD/build/asciiplay.exe"
+          test -f "$exe"
+          cp "$exe" "$bin/"
+
+          # 递归解析并拷贝 exe 依赖（含 FFmpeg 与 GCC 运行时）
+          /mingw64/bin/ntldd -R "$bin/asciiplay.exe" \
+            | awk '{for(i=1;i<=NF;i++) if ($i ~ /mingw64\/bin\/.*\.dll$/) print $i}' \
+            | sort -u \
+            | xargs -I{} cp -u "{}" "$bin/"
+
+          # 可选：再对 bin/*.dll 递归一遍，保险
+          for f in "$bin"/*.dll; do
+            /mingw64/bin/ntldd -R "$f" \
+              | awk '{for(i=1;i<=NF;i++) if ($i ~ /mingw64\/bin\/.*\.dll$/) print $i}' \
+              | sort -u \
+              | xargs -I{} cp -u "{}" "$bin/" || true
+          done
+
+          # 简单自检
+          ( "$bin/asciiplay.exe" --help || true )
+
+          # 打包
+          pushd "$dist"
+          zip -9r "$GITHUB_WORKSPACE/asciiplay-windows-gcc-x64.zip" *
+          popd
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: asciiplay-windows-gcc-x64
+          path: ${{ github.workspace }}/asciiplay-windows-gcc-x64.zip
+          if-no-files-found: error
           # 正确写入后续 step 可见的环境变量
           $env:FFSUB = $Sub.FullName
           Add-Content -Path $env:GITHUB_ENV -Value ("FFSUB=" + $env:FFSUB)

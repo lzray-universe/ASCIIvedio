@@ -1,5 +1,5 @@
 #include "ascii_renderer.hpp"
-
+#include <string_view>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -8,7 +8,7 @@
 namespace asciiplay {
 
 namespace {
-constexpr std::array<char, 10> kRamp{"@%#*+=-:. "};
+constexpr std::string_view kRamp = "@%#*+=-:. ";
 }
 
 AsciiRenderer::AsciiRenderer()

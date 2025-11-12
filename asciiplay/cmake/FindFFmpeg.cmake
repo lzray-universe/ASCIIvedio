@@ -11,7 +11,7 @@ find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h
 foreach(component AVCODEC AVFORMAT AVUTIL SWSCALE SWRESAMPLE)
     string(TOLOWER ${component} lc)
     find_library(FFMPEG_${component}_LIBRARY
-        NAMES av${lc}
+        NAMES ${lc}
         HINTS ${PC_FFMPEG_LIBRARY_DIRS}
     )
     if (NOT FFMPEG_${component}_LIBRARY)

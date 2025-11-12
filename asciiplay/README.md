@@ -17,7 +17,7 @@
 
 - C++20 编译器（GCC 11+ 或 Clang 13+）
 - CMake 3.16+
-- FFmpeg 开发包（包含 libavformat, libavcodec, libavutil, libswscale, libswresample）
+- FFmpeg 开发包（包含 libavformat, libavcodec, libavutil, libswscale, libswresample，建议使用 FFmpeg 6+，已验证于 FFmpeg 8）
 - pkg-config
 
 示例安装命令：

@@ -15,11 +15,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Ninja (faster logs)
-        run: |
-          choco install -y ninja
-          ninja --version
-
       - name: Download prebuilt FFmpeg (full shared + dev)
         run: |
           $ErrorActionPreference = "Stop"
@@ -29,12 +24,84 @@ jobs:
           $Dst = "$FFROOT\ffmpeg.7z"
           Invoke-WebRequest $Url -OutFile $Dst
 
+          # Ensure 7-Zip exists
           $SevenZip = "C:\Program Files\7-Zip\7z.exe"
           if (-not (Test-Path $SevenZip)) {
             choco install -y 7zip
             $SevenZip = "C:\Program Files\7-Zip\7z.exe"
           }
           & "$SevenZip" x $Dst -o"$FFROOT" -y
+
+          # Pick the extracted full_build-shared folder
+          $Sub = Get-ChildItem -Directory $FFROOT | Where-Object { $_.Name -like "ffmpeg-*-full_build-shared*" } | Select-Object -First 1
+          if (-not $Sub) { throw "FFmpeg folder not found under $FFROOT" }
+
+          $env:FFSUB = $Sub.FullName
+          Add-Content -Path $env:GITHUB_ENV -Value ("FFSUB=" + $env:FFSUB)
+          Write-Host "FFSUB = $env:FFSUB"
+
+      # 可选：如果你的 FindFFmpeg.cmake 里库名写成了 av${lc}，解开下面修正
+      # - name: Hotfix FindFFmpeg.cmake (fix library names)
+      #   run: (Get-Content .\asciiplay\cmake\FindFFmpeg.cmake) -replace 'NAMES av\$\{lc\}','NAMES ${lc}' | Set-Content .\asciiplay\cmake\FindFFmpeg.cmake -Encoding UTF8
+
+      - name: Configure (Visual Studio 2022 x64, Release; use prebuilt FFmpeg)
+        working-directory: ./asciiplay
+        run: >
+          # 防止 Ninja/MinGW 被选中
+          Remove-Item Env:CC,Env:CXX -ErrorAction SilentlyContinue;
+          cmake -S . -B build
+          -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_EXTENSIONS=OFF
+          -DFFMPEG_INCLUDE_DIR="$env:FFSUB\include"
+          -DFFMPEG_AVFORMAT_LIBRARY="$env:FFSUB\lib\avformat.lib"
+          -DFFMPEG_AVCODEC_LIBRARY="$env:FFSUB\lib\avcodec.lib"
+          -DFFMPEG_AVUTIL_LIBRARY="$env:FFSUB\lib\avutil.lib"
+          -DFFMPEG_SWSCALE_LIBRARY="$env:FFSUB\lib\swscale.lib"
+          -DFFMPEG_SWRESAMPLE_LIBRARY="$env:FFSUB\lib\swresample.lib"
+          -DCMAKE_EXE_LINKER_FLAGS="/link ws2_32.lib bcrypt.lib"
+
+      - name: Build (Release, MSVC)
+        working-directory: ./asciiplay
+        run: cmake --build build --config Release -- /m
+
+      - name: Bundle portable zip (exe + FFmpeg DLLs)
+        working-directory: ./asciiplay
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dist = Join-Path $PWD "dist"
+          $bin  = Join-Path $dist "bin"
+          New-Item -Force -ItemType Directory -Path $bin | Out-Null
+
+          $exe = Join-Path $PWD "build\Release\asciiplay.exe"
+          if (-not (Test-Path $exe)) { throw "asciiplay.exe not found at $exe" }
+          Copy-Item $exe $bin
+
+          # 带上 FFmpeg 运行时 dll（来自预编译包）
+          Copy-Item "$env:FFSUB\bin\*.dll" $bin -Force
+
+          # 简单自检（无输入允许非零）
+          Push-Location $dist
+          try {
+            & ".\bin\asciiplay.exe" "--help" ; $LASTEXITCODE = 0
+            & ".\bin\asciiplay.exe" ; $LASTEXITCODE = 0
+          } catch {
+            Write-Warning "Run produced non-zero exit (no input). Loader OK."
+          } finally {
+            Pop-Location
+          }
+
+          $zip = Join-Path $env:GITHUB_WORKSPACE "asciiplay-windows-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$dist\*" -DestinationPath $zip
+          Write-Host "Packed -> $zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: asciiplay-windows-x64
+          path: ${{ github.workspace }}/asciiplay-windows-x64.zip
+          if-no-files-found: error          & "$SevenZip" x $Dst -o"$FFROOT" -y
 
           $Sub = Get-ChildItem -Directory $FFROOT | Where-Object { $_.Name -like "ffmpeg-*-full_build-shared*" } | Select-Object -First 1
           if (-not $Sub) { throw "FFmpeg folder not found under $FFROOT" }

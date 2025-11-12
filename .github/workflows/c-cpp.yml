@@ -49,5 +49,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: asciiplay-linux-x86_64
-          path: asciiplay/asciiplay-linux-x86_64.tar.gz
+          path: asciiplay-linux-x86_64.tar.gz
           if-no-files-found: error

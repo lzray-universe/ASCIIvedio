@@ -7,6 +7,7 @@
 
 extern "C" {
 #include <libavutil/opt.h>
+#include <libavcodec/version.h>
 }
 
 namespace asciiplay {
@@ -50,10 +51,17 @@ void Exporter::close()
 
 bool Exporter::initializeEncoder(std::string& err)
 {
+#if LIBAVCODEC_VERSION_MAJOR >= 59
+    const AVCodec* codec = avcodec_find_encoder_by_name("libx264");
+    if (!codec) {
+        codec = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
+    }
+#else
     AVCodec* codec = avcodec_find_encoder_by_name("libx264");
     if (!codec) {
         codec = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
     }
+#endif
     if (!codec) {
         err = "No suitable encoder";
         return false;

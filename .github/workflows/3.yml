@@ -42,20 +42,20 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value ("DUMPBIN=" + $dumpbin)
           Add-Content -Path $env:GITHUB_ENV -Value ("LIBEXE="  + $libexe)
 
-      - name: Fetch FFmpeg 4.4.x (BtbN shared + try dev; fallbackheaders from ffmpeg.org)
+      - name: Fetch FFmpeg 8 (BtbN shared + try dev; fallback headers from ffmpeg.org)
         run: |
           $ErrorActionPreference = "Stop"
           $FFROOT = "C:\ffmpeg"
           New-Item -Force -ItemType Directory -Path $FFROOT | Out-Null
 
           # === 1) 你的 BtbN 固定 shared 链接 + 推断 dev ===
-          $tag       = "autobuild-2023-12-31-12-55"
+          $tag       = "n8.0-latest"
           $base      = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$tag"
           $sharedZip = Join-Path $FFROOT "ffmpeg-shared.zip"
           $devZip    = Join-Path $FFROOT "ffmpeg-dev.zip"
 
-          $sharedName = "ffmpeg-n4.4.4-89-g25841e4f90-win64-gpl-shared-4.4.zip"
-          $devName    = "ffmpeg-n4.4.4-89-g25841e4f90-win64-gpl-dev-4.4.zip"   # 同批次可能不存在
+          $sharedName = "ffmpeg-n8.0-latest-win64-gpl-shared-8.0.zip"
+          $devName    = "ffmpeg-n8.0-latest-win64-gpl-dev-8.0.zip"   # 同批次可能不存在
           $sharedUrl  = "$base/$sharedName"
           $devUrl     = "$base/$devName"
 
@@ -96,7 +96,7 @@ jobs:
           # 若 dev 不可用，则：下载源码得到 headers，并从 DLL 生成 .lib
           if (-not $devDir) {
             Write-Host "Dev package missing -> fallback: headers from ffmpeg.org + make import libs from DLLs"
-            $srcVers = @("4.4.4","4.4.2")
+            $srcVers = @("8.0.2","8.0.1","8.0")
             $srcOk   = $false
             foreach ($v in $srcVers) {
               $srcUrl = "https://ffmpeg.org/releases/ffmpeg-$v.tar.xz"
@@ -172,7 +172,7 @@ jobs:
           Write-Host "FFMPEG_DEV    = $env:FFMPEG_DEV"
           Write-Host "FFMPEG_SHARED = $env:FFMPEG_SHARED"
 
-      - name: Configure (VS2022 x64, Release; link old FFmpeg)
+      - name: Configure (VS2022 x64, Release; link FFmpeg 8)
         working-directory: ./asciiplay
         run: |
           Remove-Item Env:CC  -ErrorAction SilentlyContinue
@@ -222,7 +222,7 @@ jobs:
             Pop-Location
           }
 
-          $zip = Join-Path $env:GITHUB_WORKSPACE "asciiplay-windows-x64-ffmpeg4x.zip"
+          $zip = Join-Path $env:GITHUB_WORKSPACE "asciiplay-windows-x64-ffmpeg8x.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$dist\*" -DestinationPath $zip
           Write-Host "Packed -> $zip"
@@ -230,6 +230,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: asciiplay-windows-x64-ffmpeg4x
-          path: ${{ github.workspace }}/asciiplay-windows-x64-ffmpeg4x.zip
+          name: asciiplay-windows-x64-ffmpeg8x
+          path: ${{ github.workspace }}/asciiplay-windows-x64-ffmpeg8x.zip
           if-no-files-found: error

@@ -4,7 +4,13 @@
 #include <iostream>
 
 extern "C" {
+#include <libavutil/version.h>
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+#include <libavutil/channel_layout.h>
+#endif
 #include <libavutil/imgutils.h>
+#include <libavcodec/version.h>
+#include <libavformat/version.h>
 }
 
 namespace asciiplay {
@@ -40,8 +46,13 @@ bool Decoder::open(const DecoderOptions& options, std::string& err)
         return false;
     }
 
+#if LIBAVFORMAT_VERSION_MAJOR >= 59
+    const AVCodec* videoCodec = nullptr;
+    const AVCodec* audioCodec = nullptr;
+#else
     AVCodec* videoCodec = nullptr;
     AVCodec* audioCodec = nullptr;
+#endif
 
     videoStream_ = av_find_best_stream(fmtCtx_, AVMEDIA_TYPE_VIDEO, -1, -1, &videoCodec, 0);
     if (videoStream_ < 0 || !videoCodec) {
@@ -75,15 +86,58 @@ bool Decoder::open(const DecoderOptions& options, std::string& err)
                 audioStream_ = -1;
             } else {
                 audioTimeBase_ = fmtCtx_->streams[audioStream_]->time_base;
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+                AVChannelLayout outLayout{};
+                AVChannelLayout inLayout{};
+                av_channel_layout_default(&outLayout, 2);
+                bool layoutOk = true;
+#if LIBAVCODEC_VERSION_MAJOR >= 59
+                const AVChannelLayout* sourceLayout = nullptr;
+                if (audioCtx_->ch_layout.nb_channels > 0) {
+                    sourceLayout = &audioCtx_->ch_layout;
+                }
+#if LIBAVFORMAT_VERSION_MAJOR >= 59
+                if ((!sourceLayout || sourceLayout->nb_channels == 0) && audioStream_ >= 0) {
+                    const AVChannelLayout* streamLayout = &fmtCtx_->streams[audioStream_]->codecpar->ch_layout;
+                    if (streamLayout->nb_channels > 0) {
+                        sourceLayout = streamLayout;
+                    }
+                }
+#endif
+                if (sourceLayout && sourceLayout->nb_channels > 0) {
+                    layoutOk = av_channel_layout_copy(&inLayout, sourceLayout) >= 0;
+                } else {
+                    av_channel_layout_default(&inLayout, audioCtx_->ch_layout.nb_channels > 0 ? audioCtx_->ch_layout.nb_channels : 2);
+                }
+#else
+                av_channel_layout_default(&inLayout, 2);
+#endif
+
+                if (layoutOk) {
+                    if (swr_alloc_set_opts2(&swrCtx_, &outLayout, AV_SAMPLE_FMT_S16, 48000,
+                                            &inLayout, audioCtx_->sample_fmt, audioCtx_->sample_rate,
+                                            0, nullptr) < 0) {
+                        layoutOk = false;
+                    }
+                }
+                av_channel_layout_uninit(&outLayout);
+                av_channel_layout_uninit(&inLayout);
+                if (!layoutOk || !swrCtx_ || swr_init(swrCtx_) < 0) {
+#else
+                uint64_t inputLayout = audioCtx_->channel_layout;
+                if (inputLayout == 0) {
+                    inputLayout = av_get_default_channel_layout(audioCtx_->channels);
+                }
                 swrCtx_ = swr_alloc_set_opts(nullptr,
                                              av_get_default_channel_layout(2),
                                              AV_SAMPLE_FMT_S16,
                                              48000,
-                                             av_get_default_channel_layout(audioCtx_->channels),
+                                             inputLayout,
                                              audioCtx_->sample_fmt,
                                              audioCtx_->sample_rate,
                                              0, nullptr);
                 if (!swrCtx_ || swr_init(swrCtx_) < 0) {
+#endif
                     std::cerr << "Warning: failed to init resampler" << std::endl;
                     swr_free(&swrCtx_);
                     avcodec_free_context(&audioCtx_);

@@ -15,54 +15,57 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Ninja (faster logs)
+        run: |
+          choco install -y ninja
+          ninja --version
+
       - name: Download prebuilt FFmpeg (full shared + dev)
         run: |
           $ErrorActionPreference = "Stop"
           $FFROOT = "C:\ffmpeg"
           New-Item -Force -ItemType Directory -Path $FFROOT | Out-Null
           $Url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z"
-
           $Dst = "$FFROOT\ffmpeg.7z"
           Invoke-WebRequest $Url -OutFile $Dst
 
-          # 确保 7-Zip 可用
           $SevenZip = "C:\Program Files\7-Zip\7z.exe"
           if (-not (Test-Path $SevenZip)) {
             choco install -y 7zip
             $SevenZip = "C:\Program Files\7-Zip\7z.exe"
           }
-
           & "$SevenZip" x $Dst -o"$FFROOT" -y
 
-          # 找到解压后的 full_build-shared 目录
           $Sub = Get-ChildItem -Directory $FFROOT | Where-Object { $_.Name -like "ffmpeg-*-full_build-shared*" } | Select-Object -First 1
           if (-not $Sub) { throw "FFmpeg folder not found under $FFROOT" }
 
-          # 正确写环境变量到后续 steps
           $env:FFSUB = $Sub.FullName
           Add-Content -Path $env:GITHUB_ENV -Value ("FFSUB=" + $env:FFSUB)
-
           Write-Host "FFSUB = $env:FFSUB"
-          Get-ChildItem "$env:FFSUB" | Select-Object Name, FullName
+          Get-ChildItem "$env:FFSUB\lib" | Select-Object Name | Out-String | Write-Host
 
-      # （可选）若你的 FindFFmpeg.cmake 曾把 av${lc} 写错，解开以下两行修正
+      # 如需修 FindFFmpeg.cmake 里 av${lc}，可解开
       # - name: Hotfix FindFFmpeg.cmake (fix library names)
       #   run: (Get-Content .\asciiplay\cmake\FindFFmpeg.cmake) -replace 'NAMES av\$\{lc\}','NAMES ${lc}' | Set-Content .\asciiplay\cmake\FindFFmpeg.cmake -Encoding UTF8
 
-      - name: Configure (MSVC x64, Release; no FFmpeg build)
+      - name: Configure (MSVC x64, Release; point to prebuilt FFmpeg .lib/.h)
         working-directory: ./asciiplay
         run: >
           cmake -S . -B build
-          -G "Visual Studio 17 2022" -A x64
+          -G Ninja
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_INCLUDE_PATH="$env:FFSUB\include"
-          -DCMAKE_LIBRARY_PATH="$env:FFSUB\lib"
-          # 如需强制 C++17：解开下面一行
-          # -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_EXTENSIONS=OFF
+          -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_EXTENSIONS=OFF
+          -DFFMPEG_INCLUDE_DIR="$env:FFSUB\include"
+          -DFFMPEG_AVFORMAT_LIBRARY="$env:FFSUB\lib\avformat.lib"
+          -DFFMPEG_AVCODEC_LIBRARY="$env:FFSUB\lib\avcodec.lib"
+          -DFFMPEG_AVUTIL_LIBRARY="$env:FFSUB\lib\avutil.lib"
+          -DFFMPEG_SWSCALE_LIBRARY="$env:FFSUB\lib\swscale.lib"
+          -DFFMPEG_SWRESAMPLE_LIBRARY="$env:FFSUB\lib\swresample.lib"
+          -DCMAKE_EXE_LINKER_FLAGS="/link ws2_32.lib bcrypt.lib"
 
-      - name: Build
+      - name: Build (Release)
         working-directory: ./asciiplay
-        run: cmake --build build --config Release -j
+        run: cmake --build build -j
 
       - name: Bundle portable zip (exe + FFmpeg dll)
         working-directory: ./asciiplay
@@ -72,14 +75,15 @@ jobs:
           $bin  = Join-Path $dist "bin"
           New-Item -Force -ItemType Directory -Path $bin | Out-Null
 
-          $exe = Join-Path $PWD "build\Release\asciiplay.exe"
-          if (-not (Test-Path $exe)) { throw "asciiplay.exe not found at $exe" }
+          $exe = Join-Path $PWD "build\asciiplay.exe"
+          if (-not (Test-Path $exe)) { $exe = Join-Path $PWD "build\Release\asciiplay.exe" }
+          if (-not (Test-Path $exe)) { throw "asciiplay.exe not found" }
           Copy-Item $exe $bin
 
-          # 复制 FFmpeg 运行时 dll（来自预编译包）
+          # 带上 FFmpeg 运行时 dll
           Copy-Item "$env:FFSUB\bin\*.dll" $bin -Force
 
-          # 自检（允许无输入时报错，不视为失败）
+          # 自检（无输入允许非零）
           Push-Location $dist
           try {
             & ".\bin\asciiplay.exe" "--help" ; $LASTEXITCODE = 0
@@ -94,7 +98,6 @@ jobs:
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$dist\*" -DestinationPath $zip
           Write-Host "Packed -> $zip"
-          Get-ChildItem $zip | Format-List
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

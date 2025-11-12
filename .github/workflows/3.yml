@@ -61,7 +61,8 @@ jobs:
             -DFFMPEG_SWSCALE_LIBRARY="$env:FFSUB\lib\swscale.lib" `
             -DFFMPEG_SWRESAMPLE_LIBRARY="$env:FFSUB\lib\swresample.lib" `
             -DCMAKE_EXE_LINKER_FLAGS="/link ws2_32.lib bcrypt.lib"
-
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF `
+            -DCMAKE_CXX_FLAGS="/WX- /wd4244 /wd4100 /external:W0 /external:anglebrackets"
       - name: Build (Release, MSVC)
         working-directory: ./asciiplay
         run: cmake --build build --config Release -- /m

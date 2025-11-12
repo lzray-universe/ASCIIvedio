@@ -29,150 +29,21 @@ jobs:
             choco install -y 7zip
             $SevenZip = "C:\Program Files\7-Zip\7z.exe"
           }
-          $env:SEVENZIP = $SevenZip
-          Add-Content -Path $env:GITHUB_ENV -Value ("SEVENZIP=" + $env:SEVENZIP)
+          & "$SevenZip" x $Dst -o"$FFROOT" -y
 
-          # VS 工具路径（dumpbin/lib）
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw "VS not found" }
-          $msvcRoot = Get-ChildItem -Directory (Join-Path $vs "VC\Tools\MSVC") | Sort-Object Name -Descending | Select-Object -First 1
-          $ToolBin  = Join-Path $msvcRoot.FullName "bin\Hostx64\x64"
-          $dumpbin  = Join-Path $ToolBin "dumpbin.exe"
-          $libexe   = Join-Path $ToolBin "lib.exe"
-          if (-not (Test-Path $dumpbin)) { throw "dumpbin.exe not found" }
-          if (-not (Test-Path $libexe))   { throw "lib.exe not found" }
+          $Sub = Get-ChildItem -Directory $FFROOT | Where-Object { $_.Name -like "ffmpeg-*-full_build-shared*" } | Select-Object -First 1
+          if (-not $Sub) { throw "FFmpeg folder not found under $FFROOT" }
 
-          Add-Content -Path $env:GITHUB_ENV -Value ("DUMPBIN=" + $dumpbin)
-          Add-Content -Path $env:GITHUB_ENV -Value ("LIBEXE="  + $libexe)
-
-      - name: Fetch FFmpeg 8 (BtbN shared + try dev; fallback headers from ffmpeg.org)
-        run: |
-          $ErrorActionPreference = "Stop"
-          $FFROOT = "C:\ffmpeg"
-          New-Item -Force -ItemType Directory -Path $FFROOT | Out-Null
-
-          # === 1) 你的 BtbN 固定 shared 链接 + 推断 dev ===
-          $tag       = "n8.0-latest"
-          $base      = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$tag"
-          $sharedZip = Join-Path $FFROOT "ffmpeg-shared.zip"
-          $devZip    = Join-Path $FFROOT "ffmpeg-dev.zip"
-
-          $sharedName = "ffmpeg-n8.0-latest-win64-gpl-shared-8.0.zip"
-          $devName    = "ffmpeg-n8.0-latest-win64-gpl-dev-8.0.zip"   # 同批次可能不存在
-          $sharedUrl  = "$base/$sharedName"
-          $devUrl     = "$base/$devName"
+          # 正确写入后续 step 可见的环境变量
+          $env:FFSUB = $Sub.FullName
+          Add-Content -Path $env:GITHUB_ENV -Value ("FFSUB=" + $env:FFSUB)
+          Write-Host "FFSUB = $env:FFSUB"
 
       # 如需修正 FindFFmpeg.cmake（把 av${lc} 改为 ${lc}），取消下面注释
       # - name: Hotfix FindFFmpeg.cmake (fix library names)
       #   run: (Get-Content .\asciiplay\cmake\FindFFmpeg.cmake) -replace 'NAMES av\$\{lc\}','NAMES ${lc}' | Set-Content .\asciiplay\cmake\FindFFmpeg.cmake -Encoding UTF8
 
-          try {
-            Write-Host "Downloading DEV: $devUrl"
-            Invoke-WebRequest $devUrl -OutFile $devZip -Headers @{ "User-Agent"="actions" } -UseBasicParsing -TimeoutSec 300
-            $haveDev = Test-Path $devZip
-          } catch { Write-Warning "Dev download failed: $($_.Exception.Message)" }
-
-          if (-not $haveShared) { throw "Shared zip is required but missing." }
-
-          # 解压 shared
-          & "$env:SEVENZIP" x $sharedZip -o"$FFROOT" -y
-          $sharedDir = Get-ChildItem -Directory $FFROOT | Where-Object {
-            $_.Name -match 'win64' -and $_.Name -match 'shared' -and (Test-Path "$($_.FullName)\bin")
-          } | Select-Object -First 1
-          if (-not $sharedDir) { throw "Shared folder not found after extract." }
-
-          # 如果有 dev（含 include/lib），直接用；否则：从源码包拿 headers，并从 DLL 生成 .lib
-          if ($haveDev) {
-            & "$env:SEVENZIP" x $devZip -o"$FFROOT" -y
-            $devDir = Get-ChildItem -Directory $FFROOT | Where-Object {
-              $_.Name -match 'win64' -and $_.Name -match 'dev' -and
-              (Test-Path "$($_.FullName)\include") -and (Test-Path "$($_.FullName)\lib")
-            } | Select-Object -First 1
-            if (-not $devDir) { Write-Warning "Dev folder structure unexpected, will generate import libs." }
-          }
-
-          # 若 dev 不可用，则：下载源码得到 headers，并从 DLL 生成 .lib
-          if (-not $devDir) {
-            Write-Host "Dev package missing -> fallback: headers from ffmpeg.org + make import libs from DLLs"
-            $srcVers = @("8.0.2","8.0.1","8.0")
-            $srcOk   = $false
-            foreach ($v in $srcVers) {
-              $srcUrl = "https://ffmpeg.org/releases/ffmpeg-$v.tar.xz"
-              $dst    = Join-Path $FFROOT "ffmpeg-src.tar.xz"
-              try {
-                Write-Host "Downloading headers: $srcUrl"
-                Invoke-WebRequest $srcUrl -OutFile $dst -UseBasicParsing -TimeoutSec 300
-                & "$env:SEVENZIP" x $dst -o"$FFROOT" -y
-                $tar = Join-Path $FFROOT "ffmpeg-$v.tar"
-                & "$env:SEVENZIP" x $tar -o"$FFROOT" -y
-                Remove-Item $dst -Force -ErrorAction SilentlyContinue
-                Remove-Item $tar -Force -ErrorAction SilentlyContinue
-                $hdr = Join-Path $FFROOT "ffmpeg-$v"
-                if (Test-Path (Join-Path $hdr "libavcodec")) { $srcOk = $true; break }
-              } catch { Write-Warning "Header download failed: $($_.Exception.Message)" }
-            }
-            if (-not $srcOk) { throw "Failed to fetch ffmpeg headers from ffmpeg.org" }
-
-            # 构造 devDir 形状：include/ 和 lib/
-            $devDirPath = Join-Path $FFROOT "ffmpeg-headers-and-libs"
-            New-Item -ItemType Directory -Path (Join-Path $devDirPath "include") -Force | Out-Null
-            New-Item -ItemType Directory -Path (Join-Path $devDirPath "lib")     -Force | Out-Null
-            Copy-Item (Join-Path $hdr "*") (Join-Path $devDirPath "include") -Recurse
-
-            # 从 DLL 生成 .lib
-            $bin = Join-Path $sharedDir.FullName "bin"
-            $libOut = Join-Path $devDirPath "lib"
-
-            $targets = @(
-              @{ dll="avcodec";     hint="*" },
-              @{ dll="avformat";    hint="*" },
-              @{ dll="avutil";      hint="*" },
-              @{ dll="swscale";     hint="*" },
-              @{ dll="swresample";  hint="*" }
-            )
-
-            foreach ($t in $targets) {
-              $dllFile = Get-ChildItem $bin -Filter "$($t.dll)-*.dll" | Select-Object -First 1
-              if (-not $dllFile) { throw "Missing DLL: $($t.dll)-*.dll in $bin" }
-
-              $def = Join-Path $FFROOT "$($t.dll).def"
-              $exp = & "$env:DUMPBIN" /exports $dllFile.FullName | Out-String
-              $lines = $exp -split "`r?`n"
-              $start = ($lines | Select-String -Pattern '^\s+ordinal\s+hint\s+RVA\s+name' -List).LineNumber
-              if (-not $start) { throw "dumpbin parse failed for $($dllFile.Name)" }
-
-              $names = @()
-              for ($i=$start; $i -lt $lines.Count; $i++) {
-                $line = $lines[$i]
-                if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)$') {
-                  $names += $Matches[1]
-                }
-              }
-              if ($names.Count -eq 0) { throw "No exports found for $($dllFile.Name)" }
-
-              # 写 .def
-              "LIBRARY " + $dllFile.Name | Out-File $def -Encoding ASCII
-              "EXPORTS"                 | Out-File $def -Encoding ASCII -Append
-              $names | Out-File $def -Encoding ASCII -Append
-
-              # 生成 import .lib（命名为 avxxx.lib）
-              & "$env:LIBEXE" /def:$def /machine:x64 /out:(Join-Path $libOut "$($t.dll).lib")
-            }
-
-            $devDir = Get-Item $devDirPath
-          }
-
-          # 导出路径
-          $env:FFMPEG_DEV    = $devDir.FullName
-          $env:FFMPEG_SHARED = $sharedDir.FullName
-          Add-Content -Path $env:GITHUB_ENV -Value ("FFMPEG_DEV="    + $env:FFMPEG_DEV)
-          Add-Content -Path $env:GITHUB_ENV -Value ("FFMPEG_SHARED=" + $env:FFMPEG_SHARED)
-          Write-Host "FFMPEG_DEV    = $env:FFMPEG_DEV"
-          Write-Host "FFMPEG_SHARED = $env:FFMPEG_SHARED"
-
-      - name: Configure (VS2022 x64, Release; link FFmpeg 8)
-
+      - name: Configure (Visual Studio 2022 x64, Release; use prebuilt FFmpeg)
         working-directory: ./asciiplay
         run: |
           # 防止 Ninja/MinGW 被选中
@@ -222,7 +93,7 @@ jobs:
             Pop-Location
           }
 
-          $zip = Join-Path $env:GITHUB_WORKSPACE "asciiplay-windows-x64-ffmpeg8x.zip"
+          $zip = Join-Path $env:GITHUB_WORKSPACE "asciiplay-windows-x64.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$dist\*" -DestinationPath $zip
           Write-Host "Packed -> $zip"
@@ -230,6 +101,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: asciiplay-windows-x64-ffmpeg8x
-          path: ${{ github.workspace }}/asciiplay-windows-x64-ffmpeg8x.zip
+          name: asciiplay-windows-x64
+          path: ${{ github.workspace }}/asciiplay-windows-x64.zip
           if-no-files-found: error

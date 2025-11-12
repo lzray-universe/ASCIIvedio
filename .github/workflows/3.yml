@@ -42,7 +42,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value ("DUMPBIN=" + $dumpbin)
           Add-Content -Path $env:GITHUB_ENV -Value ("LIBEXE="  + $libexe)
 
-      - name: Fetch FFmpeg 4.4.x (BtbN shared + try dev; fallback: headers from ffmpeg.org)
+      - name: Fetch FFmpeg 4.4.x (BtbN shared + try dev; fallbackheaders from ffmpeg.org)
         run: |
           $ErrorActionPreference = "Stop"
           $FFROOT = "C:\ffmpeg"

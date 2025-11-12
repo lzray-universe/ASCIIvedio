@@ -10,27 +10,46 @@ jobs:
     defaults:
       run:
         shell: pwsh
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) 拉预编译 FFmpeg dev 包（含 include/ 与 lib/，以及 bin/*.dll）
       - name: Download prebuilt FFmpeg (full shared + dev)
         run: |
+          $ErrorActionPreference = "Stop"
           $FFROOT = "C:\ffmpeg"
           New-Item -Force -ItemType Directory -Path $FFROOT | Out-Null
-          $Url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z"  # gyan.dev 官方构建
+          $Url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z"
+
           $Dst = "$FFROOT\ffmpeg.7z"
           Invoke-WebRequest $Url -OutFile $Dst
-          # 7-Zip 一般已预装；若失败，可先: choco install -y 7zip
-          & "C:\Program Files\7-Zip\7z.exe" x $Dst -o"$FFROOT" -y
-          # 解压后目录类似 C:\ffmpeg\ffmpeg-8.0-full_build-shared\
-          $Sub = Get-ChildItem $FFROOT | Where-Object { $_.PSIsContainer -and $_.Name -like "ffmpeg-*-full_build-shared*" } | Select-Object -First 1
-          if (-not $Sub) { throw "FFmpeg folder not found after extract." }
-          "$($Sub.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 -Force -Width 200 -InputObject ("FFSUB="+$Sub.FullName)
 
-      # 2) 配置（用预编译 dev 包的 include/lib，不需要 vcpkg）
-      - name: Configure (MSVC x64, Release)
+          # 确保 7-Zip 可用
+          $SevenZip = "C:\Program Files\7-Zip\7z.exe"
+          if (-not (Test-Path $SevenZip)) {
+            choco install -y 7zip
+            $SevenZip = "C:\Program Files\7-Zip\7z.exe"
+          }
+
+          & "$SevenZip" x $Dst -o"$FFROOT" -y
+
+          # 找到解压后的 full_build-shared 目录
+          $Sub = Get-ChildItem -Directory $FFROOT | Where-Object { $_.Name -like "ffmpeg-*-full_build-shared*" } | Select-Object -First 1
+          if (-not $Sub) { throw "FFmpeg folder not found under $FFROOT" }
+
+          # 正确写环境变量到后续 steps
+          $env:FFSUB = $Sub.FullName
+          Add-Content -Path $env:GITHUB_ENV -Value ("FFSUB=" + $env:FFSUB)
+
+          Write-Host "FFSUB = $env:FFSUB"
+          Get-ChildItem "$env:FFSUB" | Select-Object Name, FullName
+
+      # （可选）若你的 FindFFmpeg.cmake 曾把 av${lc} 写错，解开以下两行修正
+      # - name: Hotfix FindFFmpeg.cmake (fix library names)
+      #   run: (Get-Content .\asciiplay\cmake\FindFFmpeg.cmake) -replace 'NAMES av\$\{lc\}','NAMES ${lc}' | Set-Content .\asciiplay\cmake\FindFFmpeg.cmake -Encoding UTF8
+
+      - name: Configure (MSVC x64, Release; no FFmpeg build)
         working-directory: ./asciiplay
         run: >
           cmake -S . -B build
@@ -38,15 +57,14 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_INCLUDE_PATH="$env:FFSUB\include"
           -DCMAKE_LIBRARY_PATH="$env:FFSUB\lib"
-          # 如需强制 C++17，解开下一行
+          # 如需强制 C++17：解开下面一行
           # -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_EXTENSIONS=OFF
 
       - name: Build
         working-directory: ./asciiplay
         run: cmake --build build --config Release -j
 
-      # 3) 做 Windows 便携包：exe + FFmpeg 所有 dll
-      - name: Bundle portable zip
+      - name: Bundle portable zip (exe + FFmpeg dll)
         working-directory: ./asciiplay
         run: |
           $ErrorActionPreference = "Stop"
@@ -55,10 +73,10 @@ jobs:
           New-Item -Force -ItemType Directory -Path $bin | Out-Null
 
           $exe = Join-Path $PWD "build\Release\asciiplay.exe"
-          if (-not (Test-Path $exe)) { throw "asciiplay.exe not found" }
+          if (-not (Test-Path $exe)) { throw "asciiplay.exe not found at $exe" }
           Copy-Item $exe $bin
 
-          # 拷 FFmpeg 运行时的 dll
+          # 复制 FFmpeg 运行时 dll（来自预编译包）
           Copy-Item "$env:FFSUB\bin\*.dll" $bin -Force
 
           # 自检（允许无输入时报错，不视为失败）
@@ -76,6 +94,7 @@ jobs:
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$dist\*" -DestinationPath $zip
           Write-Host "Packed -> $zip"
+          Get-ChildItem $zip | Format-List
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

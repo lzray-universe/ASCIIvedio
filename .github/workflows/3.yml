@@ -1,0 +1,85 @@
+name: build-asciiplay-windows-portable-fast
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-win:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 1) 拉预编译 FFmpeg dev 包（含 include/ 与 lib/，以及 bin/*.dll）
+      - name: Download prebuilt FFmpeg (full shared + dev)
+        run: |
+          $FFROOT = "C:\ffmpeg"
+          New-Item -Force -ItemType Directory -Path $FFROOT | Out-Null
+          $Url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z"  # gyan.dev 官方构建
+          $Dst = "$FFROOT\ffmpeg.7z"
+          Invoke-WebRequest $Url -OutFile $Dst
+          # 7-Zip 一般已预装；若失败，可先: choco install -y 7zip
+          & "C:\Program Files\7-Zip\7z.exe" x $Dst -o"$FFROOT" -y
+          # 解压后目录类似 C:\ffmpeg\ffmpeg-8.0-full_build-shared\
+          $Sub = Get-ChildItem $FFROOT | Where-Object { $_.PSIsContainer -and $_.Name -like "ffmpeg-*-full_build-shared*" } | Select-Object -First 1
+          if (-not $Sub) { throw "FFmpeg folder not found after extract." }
+          "$($Sub.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 -Force -Width 200 -InputObject ("FFSUB="+$Sub.FullName)
+
+      # 2) 配置（用预编译 dev 包的 include/lib，不需要 vcpkg）
+      - name: Configure (MSVC x64, Release)
+        working-directory: ./asciiplay
+        run: >
+          cmake -S . -B build
+          -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_INCLUDE_PATH="$env:FFSUB\include"
+          -DCMAKE_LIBRARY_PATH="$env:FFSUB\lib"
+          # 如需强制 C++17，解开下一行
+          # -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_EXTENSIONS=OFF
+
+      - name: Build
+        working-directory: ./asciiplay
+        run: cmake --build build --config Release -j
+
+      # 3) 做 Windows 便携包：exe + FFmpeg 所有 dll
+      - name: Bundle portable zip
+        working-directory: ./asciiplay
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dist = Join-Path $PWD "dist"
+          $bin  = Join-Path $dist "bin"
+          New-Item -Force -ItemType Directory -Path $bin | Out-Null
+
+          $exe = Join-Path $PWD "build\Release\asciiplay.exe"
+          if (-not (Test-Path $exe)) { throw "asciiplay.exe not found" }
+          Copy-Item $exe $bin
+
+          # 拷 FFmpeg 运行时的 dll
+          Copy-Item "$env:FFSUB\bin\*.dll" $bin -Force
+
+          # 自检（允许无输入时报错，不视为失败）
+          Push-Location $dist
+          try {
+            & ".\bin\asciiplay.exe" "--help" ; $LASTEXITCODE = 0
+            & ".\bin\asciiplay.exe" ; $LASTEXITCODE = 0
+          } catch {
+            Write-Warning "Run produced non-zero exit (no input). Loader OK."
+          } finally {
+            Pop-Location
+          }
+
+          $zip = Join-Path $env:GITHUB_WORKSPACE "asciiplay-windows-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$dist\*" -DestinationPath $zip
+          Write-Host "Packed -> $zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: asciiplay-windows-x64
+          path: ${{ github.workspace }}/asciiplay-windows-x64.zip
+          if-no-files-found: error

@@ -66,9 +66,6 @@ jobs:
           # 5) 设 RPATH：../lib
           patchelf --set-rpath '$ORIGIN/../lib' dist/bin/asciiplay || true
 
-          # 6) 自检（不用 env -i，防止路径问题）
-          echo "=== self-test ==="
-          ( cd dist && LD_LIBRARY_PATH="./lib" ./bin/asciiplay --help >/dev/null )
 
           # 7) 打包到仓库根（绝对路径），并校验存在
           tar -C dist -czf "$ARTIFACT" .

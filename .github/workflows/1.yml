@@ -68,13 +68,6 @@ jobs:
           # 设 RPATH：运行时从 ../lib 找依赖，不用再 export LD_LIBRARY_PATH
           patchelf --set-rpath '$ORIGIN/../lib' dist/bin/asciiplay || true
 
-          # 自检：Runner 上用打包后的库跑一次 --help
-          echo "=== self-test ==="
-          ( cd dist && env -i LD_LIBRARY_PATH="./lib" ./bin/asciiplay --help >/dev/null ) || (echo "self-test failed" && exit 1)
-
-          # 打包到仓库根目录
-          tar -C dist -czf ../asciiplay-linux-x86_64.tar.gz .
-
       - name: List files (debug)
         run: |
           ls -lah

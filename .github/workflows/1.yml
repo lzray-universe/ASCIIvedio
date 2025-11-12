@@ -1,0 +1,88 @@
+name: build-asciiplay-linux
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps (FFmpeg dev + toolchain)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config patchelf \
+            libavcodec-dev libavformat-dev libavutil-dev \
+            libswscale-dev libswresample-dev
+
+      # 可选：若你的 FindFFmpeg.cmake 里有 av${lc} 的拼写问题，解开下面两行
+      # - name: Hotfix FindFFmpeg.cmake (fix library names)
+      #   run: sed -i 's/NAMES av${lc}/NAMES ${lc}/' ./asciiplay/cmake/FindFFmpeg.cmake
+
+      # 可选：如需强制 C++17，解开下两行（否则沿用你项目默认标准）
+      # - name: Configure (CMake Release, C++17)
+      #   run: cmake -S ./asciiplay -B ./asciiplay/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_EXTENSIONS=OFF
+
+      - name: Configure (CMake Release)
+        working-directory: ./asciiplay
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        working-directory: ./asciiplay
+        run: cmake --build build -j
+
+      - name: Bundle runtime libs (portable)
+        working-directory: ./asciiplay
+        run: |
+          set -euo pipefail
+          mkdir -p dist/bin dist/lib
+          cp build/asciiplay dist/bin/
+
+          # 先带上核心 FFmpeg 动态库
+          for n in libavcodec libavformat libavutil libswscale libswresample; do
+            find /usr/lib/x86_64-linux-gnu -maxdepth 1 -name "${n}.so*" -exec cp -v {} dist/lib/ \; || true
+          done
+
+          # 用 ldd 扫描依赖，复制除 glibc 基础件外的所有 .so（包含 x264/dav1d/srt/harfbuzz/freetype 等）
+          EXCL='(linux-vdso|ld-linux|/lib/x86_64-linux-gnu/libc\.so|/lib/x86_64-linux-gnu/libm\.so|/lib/x86_64-linux-gnu/libdl\.so|/lib/x86_64-linux-gnu/libpthread\.so|/lib/x86_64-linux-gnu/librt\.so|/lib/x86_64-linux-gnu/libgcc_s\.so)'
+          scan_copy() {
+            local f="$1"
+            ldd "$f" | awk '/=>/ {print $3} /^\/.*/ {print $1}' | \
+              grep -E '^/' | grep -Ev "$EXCL" | sort -u | \
+              xargs -r -I{} cp -vn {} dist/lib/ || true
+          }
+
+          # 迭代扫描几轮，拿到传递依赖
+          for i in 1 2 3; do
+            scan_copy dist/bin/asciiplay
+            for so in dist/lib/*.so*; do [ -f "$so" ] && scan_copy "$so"; done
+          done
+
+          # 加上 libstdc++ 以免不同机器版本不一致
+          cp -vn /usr/lib/x86_64-linux-gnu/libstdc++.so.* dist/lib/ || true
+
+          # 设 RPATH：运行时从 ../lib 找依赖，不用再 export LD_LIBRARY_PATH
+          patchelf --set-rpath '$ORIGIN/../lib' dist/bin/asciiplay || true
+
+          # 自检：Runner 上用打包后的库跑一次 --help
+          echo "=== self-test ==="
+          ( cd dist && env -i LD_LIBRARY_PATH="./lib" ./bin/asciiplay --help >/dev/null ) || (echo "self-test failed" && exit 1)
+
+          # 打包到仓库根目录
+          tar -C dist -czf ../asciiplay-linux-x86_64.tar.gz .
+
+      - name: List files (debug)
+        run: |
+          ls -lah
+          ls -lah asciiplay || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: asciiplay-linux-x86_64
+          path: asciiplay-linux-x86_64.tar.gz
+          if-no-files-found: error

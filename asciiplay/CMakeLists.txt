@@ -6,8 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(GNUInstallDirs)
--DCMAKE_COMPILE_WARNING_AS_ERROR=OFF `
--DCMAKE_CXX_FLAGS="/WX- /wd4244 /wd4100 /external:W0 /external:anglebrackets"
+
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 find_package(Threads REQUIRED)

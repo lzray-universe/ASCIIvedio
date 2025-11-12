@@ -15,74 +15,86 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download prebuilt FFmpeg 4.4.x (full shared + dev, pinned)
+      - name: Download FFmpeg 4.4.x (dev + shared) from BtbN/FFmpeg-Builds
         run: |
           $ErrorActionPreference = "Stop"
           $FFROOT = "C:\ffmpeg"
           New-Item -Force -ItemType Directory -Path $FFROOT | Out-Null
 
-          # 依次尝试 FFmpeg 4.4.x 固定包（老 API）
-          $versions = @("4.4.4","4.4.3","4.4.2","4.4.1","4.4")
-          $candidates = @()
-          foreach ($v in $versions) {
-            $candidates += "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-$v-full_build-shared.7z"
-            $candidates += "https://www.gyan.dev/ffmpeg/builds/ffmpeg-$v-full_build-shared.7z"
-          }
-
-          $Dst = "$FFROOT\ffmpeg.7z"
-          $ok = $false
-          foreach ($u in $candidates) {
+          function Get-Assets($tag) {
+            $api = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/$tag"
             try {
-              Write-Host "Trying: $u"
-              Invoke-WebRequest -Uri $u -OutFile $Dst -UseBasicParsing -TimeoutSec 120
-              $ok = $true
-              break
-            } catch {
-              Write-Warning "Fetch failed: $u"
-            }
+              $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent"="actions" } -ErrorAction Stop
+            } catch { return $null }
+            $assets = $release.assets
+            if (-not $assets) { return $null }
+            $dev    = $assets | Where-Object { $_.name -match 'win64.*lgpl.*dev.*\.zip$' }    | Select-Object -First 1
+            $shared = $assets | Where-Object { $_.name -match 'win64.*lgpl.*shared.*\.zip$' } | Select-Object -First 1
+            if ($dev -and $shared) { return @{ dev=$dev.browser_download_url; shared=$shared.browser_download_url } }
+            return $null
           }
-          if (-not $ok) { throw "Failed to download FFmpeg 4.4.x full_build-shared from gyan.dev" }
 
-          # 确保 7-Zip 可用
+          $tags = @('n4.4.4','n4.4.3','n4.4.2','n4.4.1','n4.4')
+          $urls = $null
+          foreach ($t in $tags) {
+            Write-Host "Querying FFmpeg-Builds tag $t"
+            $urls = Get-Assets $t
+            if ($urls) { $global:tag = $t; break }
+          }
+          if (-not $urls) { throw "Unable to locate FFmpeg 4.4.x assets from BtbN/FFmpeg-Builds" }
+
+          $devZip    = Join-Path $FFROOT "ffmpeg-dev.zip"
+          $sharedZip = Join-Path $FFROOT "ffmpeg-shared.zip"
+          Write-Host "Downloading DEV:    $($urls.dev)"
+          Invoke-WebRequest $urls.dev    -OutFile $devZip    -Headers @{ "User-Agent"="actions" } -UseBasicParsing -TimeoutSec 300
+          Write-Host "Downloading SHARED: $($urls.shared)"
+          Invoke-WebRequest $urls.shared -OutFile $sharedZip -Headers @{ "User-Agent"="actions" } -UseBasicParsing -TimeoutSec 300
+
           $SevenZip = "C:\Program Files\7-Zip\7z.exe"
           if (-not (Test-Path $SevenZip)) {
             choco install -y 7zip
             $SevenZip = "C:\Program Files\7-Zip\7z.exe"
           }
-          & "$SevenZip" x $Dst -o"$FFROOT" -y
+          & "$SevenZip" x $devZip    -o"$FFROOT" -y
+          & "$SevenZip" x $sharedZip -o"$FFROOT" -y
 
-          # 选择解压出来的 4.4.* full_build-shared 目录
-          $Sub = Get-ChildItem -Directory $FFROOT | Where-Object {
-            $_.Name -match '^ffmpeg-4\.4(\.\d+)?-full_build-shared'
-          } | Select-Object -First 1
-          if (-not $Sub) { throw "FFmpeg 4.4.x full_build-shared folder not found under $FFROOT" }
+          # 抓解压出的目录（dev / shared）
+          $devDir    = (Get-ChildItem -Directory $FFROOT | Where-Object { $_.Name -match 'win64.*dev' }    | Select-Object -First 1)
+          $sharedDir = (Get-ChildItem -Directory $FFROOT | Where-Object { $_.Name -match 'win64.*shared' } | Select-Object -First 1)
+          if (-not $devDir   ) { throw "FFmpeg dev folder not found after extract" }
+          if (-not $sharedDir) { throw "FFmpeg shared folder not found after extract" }
 
-          $env:FFSUB = $Sub.FullName
-          Add-Content -Path $env:GITHUB_ENV -Value ("FFSUB=" + $env:FFSUB)
-          Write-Host "Using FFSUB = $env:FFSUB"
-          Write-Host "Libs:"; Get-ChildItem "$env:FFSUB\lib" | Select-Object Name
+          $env:FFMPEG_DEV    = $devDir.FullName
+          $env:FFMPEG_SHARED = $sharedDir.FullName
+          Add-Content -Path $env:GITHUB_ENV -Value ("FFMPEG_DEV="    + $env:FFMPEG_DEV)
+          Add-Content -Path $env:GITHUB_ENV -Value ("FFMPEG_SHARED=" + $env:FFMPEG_SHARED)
+
+          Write-Host "FFMPEG_DEV    = $env:FFMPEG_DEV"
+          Write-Host "FFMPEG_SHARED = $env:FFMPEG_SHARED"
+          Write-Host "DEV libs:";    Get-ChildItem "$env:FFMPEG_DEV\lib" | Select-Object Name | Format-Table -AutoSize
+          Write-Host "SHARED bins:"; Get-ChildItem "$env:FFMPEG_SHARED\bin" -Filter *.dll | Select-Object Name | Format-Table -AutoSize
 
       # 如需修正 FindFFmpeg.cmake（把 av${lc} 改为 ${lc}），取消下面注释
       # - name: Hotfix FindFFmpeg.cmake (fix library names)
       #   run: (Get-Content .\asciiplay\cmake\FindFFmpeg.cmake) -replace 'NAMES av\$\{lc\}','NAMES ${lc}' | Set-Content .\asciiplay\cmake\FindFFmpeg.cmake -Encoding UTF8
 
-      - name: Configure (Visual Studio 2022 x64, Release; link FFmpeg 4.4.x)
+      - name: Configure (VS2022 x64, Release; link FFmpeg 4.4.x)
         working-directory: ./asciiplay
         run: |
           # 强制 MSVC，避免误选 MinGW
-          Remove-Item Env:CC -ErrorAction SilentlyContinue
+          Remove-Item Env:CC  -ErrorAction SilentlyContinue
           Remove-Item Env:CXX -ErrorAction SilentlyContinue
 
           cmake -S . -B build `
             -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_EXTENSIONS=OFF `
-            -DFFMPEG_INCLUDE_DIR="$env:FFSUB\include" `
-            -DFFMPEG_AVFORMAT_LIBRARY="$env:FFSUB\lib\avformat.lib" `
-            -DFFMPEG_AVCODEC_LIBRARY="$env:FFSUB\lib\avcodec.lib" `
-            -DFFMPEG_AVUTIL_LIBRARY="$env:FFSUB\lib\avutil.lib" `
-            -DFFMPEG_SWSCALE_LIBRARY="$env:FFSUB\lib\swscale.lib" `
-            -DFFMPEG_SWRESAMPLE_LIBRARY="$env:FFSUB\lib\swresample.lib" `
+            -DFFMPEG_INCLUDE_DIR="$env:FFMPEG_DEV\include" `
+            -DFFMPEG_AVFORMAT_LIBRARY="$env:FFMPEG_DEV\lib\avformat.lib" `
+            -DFFMPEG_AVCODEC_LIBRARY="$env:FFMPEG_DEV\lib\avcodec.lib" `
+            -DFFMPEG_AVUTIL_LIBRARY="$env:FFMPEG_DEV\lib\avutil.lib" `
+            -DFFMPEG_SWSCALE_LIBRARY="$env:FFMPEG_DEV\lib\swscale.lib" `
+            -DFFMPEG_SWRESAMPLE_LIBRARY="$env:FFMPEG_DEV\lib\swresample.lib" `
             -DCMAKE_EXE_LINKER_FLAGS="/link ws2_32.lib bcrypt.lib" `
             -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF `
             -DCMAKE_CXX_FLAGS="/WX- /wd4244 /wd4100 /external:W0 /external:anglebrackets"
@@ -103,10 +115,10 @@ jobs:
           if (-not (Test-Path $exe)) { throw "asciiplay.exe not found at $exe" }
           Copy-Item $exe $bin
 
-          # 带上 FFmpeg 4.4.x 运行时 dll
-          Copy-Item "$env:FFSUB\bin\*.dll" $bin -Force
+          # 带上 FFmpeg 4.4.x 的运行时 DLL（来自 shared 包）
+          Copy-Item "$env:FFMPEG_SHARED\bin\*.dll" $bin -Force
 
-          # 简单自检（无输入允许非零）
+          # 自检（无输入允许非零）
           Push-Location $dist
           try {
             & ".\bin\asciiplay.exe" "--help" ; $LASTEXITCODE = 0
@@ -117,7 +129,7 @@ jobs:
             Pop-Location
           }
 
-          $zip = Join-Path $env:GITHUB_WORKSPACE "asciiplay-windows-x64-ffmpeg44.zip"
+          $zip = Join-Path $env:GITHUB_WORKSPACE "asciiplay-windows-x64-ffmpeg4x.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$dist\*" -DestinationPath $zip
           Write-Host "Packed -> $zip"
@@ -125,6 +137,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: asciiplay-windows-x64-ffmpeg44
-          path: ${{ github.workspace }}/asciiplay-windows-x64-ffmpeg44.zip
+          name: asciiplay-windows-x64-ffmpeg4x
+          path: ${{ github.workspace }}/asciiplay-windows-x64-ffmpeg4x.zip
           if-no-files-found: error

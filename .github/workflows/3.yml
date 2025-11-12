@@ -15,15 +15,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download prebuilt FFmpeg (full shared + dev)
+      - name: Download prebuilt FFmpeg 4.4.x (full shared + dev, pinned)
         run: |
           $ErrorActionPreference = "Stop"
           $FFROOT = "C:\ffmpeg"
           New-Item -Force -ItemType Directory -Path $FFROOT | Out-Null
-          $Url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z"
-          $Dst = "$FFROOT\ffmpeg.7z"
-          Invoke-WebRequest $Url -OutFile $Dst
 
+          # 依次尝试 FFmpeg 4.4.x 固定包（老 API）
+          $versions = @("4.4.4","4.4.3","4.4.2","4.4.1","4.4")
+          $candidates = @()
+          foreach ($v in $versions) {
+            $candidates += "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-$v-full_build-shared.7z"
+            $candidates += "https://www.gyan.dev/ffmpeg/builds/ffmpeg-$v-full_build-shared.7z"
+          }
+
+          $Dst = "$FFROOT\ffmpeg.7z"
+          $ok = $false
+          foreach ($u in $candidates) {
+            try {
+              Write-Host "Trying: $u"
+              Invoke-WebRequest -Uri $u -OutFile $Dst -UseBasicParsing -TimeoutSec 120
+              $ok = $true
+              break
+            } catch {
+              Write-Warning "Fetch failed: $u"
+            }
+          }
+          if (-not $ok) { throw "Failed to download FFmpeg 4.4.x full_build-shared from gyan.dev" }
+
+          # 确保 7-Zip 可用
           $SevenZip = "C:\Program Files\7-Zip\7z.exe"
           if (-not (Test-Path $SevenZip)) {
             choco install -y 7zip
@@ -31,22 +51,25 @@ jobs:
           }
           & "$SevenZip" x $Dst -o"$FFROOT" -y
 
-          $Sub = Get-ChildItem -Directory $FFROOT | Where-Object { $_.Name -like "ffmpeg-*-full_build-shared*" } | Select-Object -First 1
-          if (-not $Sub) { throw "FFmpeg folder not found under $FFROOT" }
+          # 选择解压出来的 4.4.* full_build-shared 目录
+          $Sub = Get-ChildItem -Directory $FFROOT | Where-Object {
+            $_.Name -match '^ffmpeg-4\.4(\.\d+)?-full_build-shared'
+          } | Select-Object -First 1
+          if (-not $Sub) { throw "FFmpeg 4.4.x full_build-shared folder not found under $FFROOT" }
 
-          # 正确写入后续 step 可见的环境变量
           $env:FFSUB = $Sub.FullName
           Add-Content -Path $env:GITHUB_ENV -Value ("FFSUB=" + $env:FFSUB)
-          Write-Host "FFSUB = $env:FFSUB"
+          Write-Host "Using FFSUB = $env:FFSUB"
+          Write-Host "Libs:"; Get-ChildItem "$env:FFSUB\lib" | Select-Object Name
 
       # 如需修正 FindFFmpeg.cmake（把 av${lc} 改为 ${lc}），取消下面注释
       # - name: Hotfix FindFFmpeg.cmake (fix library names)
       #   run: (Get-Content .\asciiplay\cmake\FindFFmpeg.cmake) -replace 'NAMES av\$\{lc\}','NAMES ${lc}' | Set-Content .\asciiplay\cmake\FindFFmpeg.cmake -Encoding UTF8
 
-      - name: Configure (Visual Studio 2022 x64, Release; use prebuilt FFmpeg)
+      - name: Configure (Visual Studio 2022 x64, Release; link FFmpeg 4.4.x)
         working-directory: ./asciiplay
         run: |
-          # 防止 Ninja/MinGW 被选中
+          # 强制 MSVC，避免误选 MinGW
           Remove-Item Env:CC -ErrorAction SilentlyContinue
           Remove-Item Env:CXX -ErrorAction SilentlyContinue
 
@@ -63,11 +86,12 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="/link ws2_32.lib bcrypt.lib" `
             -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF `
             -DCMAKE_CXX_FLAGS="/WX- /wd4244 /wd4100 /external:W0 /external:anglebrackets"
+
       - name: Build (Release, MSVC)
         working-directory: ./asciiplay
         run: cmake --build build --config Release -- /m
 
-      - name: Bundle portable zip (exe + FFmpeg DLLs)
+      - name: Bundle portable zip (exe + FFmpeg 4.4.x DLLs)
         working-directory: ./asciiplay
         run: |
           $ErrorActionPreference = "Stop"
@@ -79,7 +103,7 @@ jobs:
           if (-not (Test-Path $exe)) { throw "asciiplay.exe not found at $exe" }
           Copy-Item $exe $bin
 
-          # 带上 FFmpeg 运行时 dll（来自预编译包）
+          # 带上 FFmpeg 4.4.x 运行时 dll
           Copy-Item "$env:FFSUB\bin\*.dll" $bin -Force
 
           # 简单自检（无输入允许非零）
@@ -93,7 +117,7 @@ jobs:
             Pop-Location
           }
 
-          $zip = Join-Path $env:GITHUB_WORKSPACE "asciiplay-windows-x64.zip"
+          $zip = Join-Path $env:GITHUB_WORKSPACE "asciiplay-windows-x64-ffmpeg44.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$dist\*" -DestinationPath $zip
           Write-Host "Packed -> $zip"
@@ -101,6 +125,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: asciiplay-windows-x64
-          path: ${{ github.workspace }}/asciiplay-windows-x64.zip
+          name: asciiplay-windows-x64-ffmpeg44
+          path: ${{ github.workspace }}/asciiplay-windows-x64-ffmpeg44.zip
           if-no-files-found: error

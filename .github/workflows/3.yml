@@ -15,11 +15,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare 7-Zip & VS tools discovery
+      - name: Download prebuilt FFmpeg (full shared + dev)
         run: |
           $ErrorActionPreference = "Stop"
+          $FFROOT = "C:\ffmpeg"
+          New-Item -Force -ItemType Directory -Path $FFROOT | Out-Null
+          $Url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z"
+          $Dst = "$FFROOT\ffmpeg.7z"
+          Invoke-WebRequest $Url -OutFile $Dst
 
-          # 7-Zip
           $SevenZip = "C:\Program Files\7-Zip\7z.exe"
           if (-not (Test-Path $SevenZip)) {
             choco install -y 7zip
@@ -59,14 +63,9 @@ jobs:
           $sharedUrl  = "$base/$sharedName"
           $devUrl     = "$base/$devName"
 
-          $haveShared = $false
-          $haveDev    = $false
-
-          try {
-            Write-Host "Downloading SHARED: $sharedUrl"
-            Invoke-WebRequest $sharedUrl -OutFile $sharedZip -Headers @{ "User-Agent"="actions" } -UseBasicParsing -TimeoutSec 300
-            $haveShared = Test-Path $sharedZip
-          } catch { Write-Warning "Shared download failed: $($_.Exception.Message)" }
+      # 如需修正 FindFFmpeg.cmake（把 av${lc} 改为 ${lc}），取消下面注释
+      # - name: Hotfix FindFFmpeg.cmake (fix library names)
+      #   run: (Get-Content .\asciiplay\cmake\FindFFmpeg.cmake) -replace 'NAMES av\$\{lc\}','NAMES ${lc}' | Set-Content .\asciiplay\cmake\FindFFmpeg.cmake -Encoding UTF8
 
           try {
             Write-Host "Downloading DEV: $devUrl"
@@ -173,25 +172,26 @@ jobs:
           Write-Host "FFMPEG_SHARED = $env:FFMPEG_SHARED"
 
       - name: Configure (VS2022 x64, Release; link FFmpeg 8)
+
         working-directory: ./asciiplay
         run: |
-          Remove-Item Env:CC  -ErrorAction SilentlyContinue
+          # 防止 Ninja/MinGW 被选中
+          Remove-Item Env:CC -ErrorAction SilentlyContinue
           Remove-Item Env:CXX -ErrorAction SilentlyContinue
 
           cmake -S . -B build `
             -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_EXTENSIONS=OFF `
-            -DFFMPEG_INCLUDE_DIR="$env:FFMPEG_DEV\include" `
-            -DFFMPEG_AVFORMAT_LIBRARY="$env:FFMPEG_DEV\lib\avformat.lib" `
-            -DFFMPEG_AVCODEC_LIBRARY="$env:FFMPEG_DEV\lib\avcodec.lib" `
-            -DFFMPEG_AVUTIL_LIBRARY="$env:FFMPEG_DEV\lib\avutil.lib" `
-            -DFFMPEG_SWSCALE_LIBRARY="$env:FFMPEG_DEV\lib\swscale.lib" `
-            -DFFMPEG_SWRESAMPLE_LIBRARY="$env:FFMPEG_DEV\lib\swresample.lib" `
+            -DFFMPEG_INCLUDE_DIR="$env:FFSUB\include" `
+            -DFFMPEG_AVFORMAT_LIBRARY="$env:FFSUB\lib\avformat.lib" `
+            -DFFMPEG_AVCODEC_LIBRARY="$env:FFSUB\lib\avcodec.lib" `
+            -DFFMPEG_AVUTIL_LIBRARY="$env:FFSUB\lib\avutil.lib" `
+            -DFFMPEG_SWSCALE_LIBRARY="$env:FFSUB\lib\swscale.lib" `
+            -DFFMPEG_SWRESAMPLE_LIBRARY="$env:FFSUB\lib\swresample.lib" `
             -DCMAKE_EXE_LINKER_FLAGS="/link ws2_32.lib bcrypt.lib" `
             -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF `
             -DCMAKE_CXX_FLAGS="/WX- /wd4244 /wd4100 /external:W0 /external:anglebrackets"
-
       - name: Build (Release, MSVC)
         working-directory: ./asciiplay
         run: cmake --build build --config Release -- /m
@@ -208,10 +208,10 @@ jobs:
           if (-not (Test-Path $exe)) { throw "asciiplay.exe not found at $exe" }
           Copy-Item $exe $bin
 
-          # 拷贝运行时 DLL（shared 包目录）
-          Copy-Item "$env:FFMPEG_SHARED\bin\*.dll" $bin -Force
+          # 带上 FFmpeg 运行时 dll（来自预编译包）
+          Copy-Item "$env:FFSUB\bin\*.dll" $bin -Force
 
-          # 自检（无输入允许非零）
+          # 简单自检（无输入允许非零）
           Push-Location $dist
           try {
             & ".\bin\asciiplay.exe" "--help" ; $LASTEXITCODE = 0

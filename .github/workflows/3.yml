@@ -15,41 +15,50 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download FFmpeg 4.4.x (dev + shared) from BtbN/FFmpeg-Builds
+      - name: Fetch FFmpeg 4.4.x (dev + shared) from BtbN Releases
         run: |
           $ErrorActionPreference = "Stop"
           $FFROOT = "C:\ffmpeg"
           New-Item -Force -ItemType Directory -Path $FFROOT | Out-Null
 
-          function Get-Assets($tag) {
-            $api = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/$tag"
-            try {
-              $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent"="actions" } -ErrorAction Stop
-            } catch { return $null }
-            $assets = $release.assets
-            if (-not $assets) { return $null }
-            $dev    = $assets | Where-Object { $_.name -match 'win64.*lgpl.*dev.*\.zip$' }    | Select-Object -First 1
-            $shared = $assets | Where-Object { $_.name -match 'win64.*lgpl.*shared.*\.zip$' } | Select-Object -First 1
-            if ($dev -and $shared) { return @{ dev=$dev.browser_download_url; shared=$shared.browser_download_url } }
+          function Find-AssetUrl {
+            param([string]$pattern, [int]$pages = 5)
+            $headers = @{ "User-Agent"="actions"; "Accept"="application/vnd.github+json" }
+            for ($p=1; $p -le $pages; $p++) {
+              $api = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=50&page=$p"
+              try {
+                $rels = Invoke-RestMethod -Uri $api -Headers $headers -ErrorAction Stop
+              } catch { continue }
+              foreach ($rel in $rels) {
+                foreach ($asset in ($rel.assets | ForEach-Object { $_ })) {
+                  if ($null -ne $asset -and $asset.name -match $pattern) {
+                    return $asset.browser_download_url
+                  }
+                }
+              }
+            }
             return $null
           }
 
-          $tags = @('n4.4.4','n4.4.3','n4.4.2','n4.4.1','n4.4')
-          $urls = $null
-          foreach ($t in $tags) {
-            Write-Host "Querying FFmpeg-Builds tag $t"
-            $urls = Get-Assets $t
-            if ($urls) { $global:tag = $t; break }
+          # 优先找 LGPL；找不到再退 GPL
+          $devUrl    = Find-AssetUrl '^ffmpeg-n?4\.4(\.\d+)?-.*-win64-.*-lgpl-.*dev.*\.zip$'
+          if (-not $devUrl)    { $devUrl    = Find-AssetUrl '^ffmpeg-n?4\.4(\.\d+)?-.*-win64-.*-gpl-.*dev.*\.zip$' }
+          $sharedUrl = Find-AssetUrl '^ffmpeg-n?4\.4(\.\d+)?-.*-win64-.*-lgpl-.*shared.*\.zip$'
+          if (-not $sharedUrl) { $sharedUrl = Find-AssetUrl '^ffmpeg-n?4\.4(\.\d+)?-.*-win64-.*-gpl-.*shared.*\.zip$' }
+
+          if (-not $devUrl -or -not $sharedUrl) {
+            throw "Unable to locate FFmpeg 4.4.x dev/shared assets on BtbN releases."
           }
-          if (-not $urls) { throw "Unable to locate FFmpeg 4.4.x assets from BtbN/FFmpeg-Builds" }
+
+          Write-Host "DEV URL:    $devUrl"
+          Write-Host "SHARED URL: $sharedUrl"
 
           $devZip    = Join-Path $FFROOT "ffmpeg-dev.zip"
           $sharedZip = Join-Path $FFROOT "ffmpeg-shared.zip"
-          Write-Host "Downloading DEV:    $($urls.dev)"
-          Invoke-WebRequest $urls.dev    -OutFile $devZip    -Headers @{ "User-Agent"="actions" } -UseBasicParsing -TimeoutSec 300
-          Write-Host "Downloading SHARED: $($urls.shared)"
-          Invoke-WebRequest $urls.shared -OutFile $sharedZip -Headers @{ "User-Agent"="actions" } -UseBasicParsing -TimeoutSec 300
+          Invoke-WebRequest $devUrl    -OutFile $devZip    -Headers @{ "User-Agent"="actions" } -UseBasicParsing -TimeoutSec 300
+          Invoke-WebRequest $sharedUrl -OutFile $sharedZip -Headers @{ "User-Agent"="actions" } -UseBasicParsing -TimeoutSec 300
 
+          # 解压
           $SevenZip = "C:\Program Files\7-Zip\7z.exe"
           if (-not (Test-Path $SevenZip)) {
             choco install -y 7zip
@@ -58,9 +67,16 @@ jobs:
           & "$SevenZip" x $devZip    -o"$FFROOT" -y
           & "$SevenZip" x $sharedZip -o"$FFROOT" -y
 
-          # 抓解压出的目录（dev / shared）
-          $devDir    = (Get-ChildItem -Directory $FFROOT | Where-Object { $_.Name -match 'win64.*dev' }    | Select-Object -First 1)
-          $sharedDir = (Get-ChildItem -Directory $FFROOT | Where-Object { $_.Name -match 'win64.*shared' } | Select-Object -First 1)
+          # 识别 dev / shared 目录
+          $devDir = Get-ChildItem -Directory $FFROOT | Where-Object {
+            $_.Name -match 'win64' -and $_.Name -match 'dev' -and
+            (Test-Path "$($_.FullName)\include") -and (Test-Path "$($_.FullName)\lib")
+          } | Select-Object -First 1
+          $sharedDir = Get-ChildItem -Directory $FFROOT | Where-Object {
+            $_.Name -match 'win64' -and $_.Name -match 'shared' -and
+            (Test-Path "$($_.FullName)\bin")
+          } | Select-Object -First 1
+
           if (-not $devDir   ) { throw "FFmpeg dev folder not found after extract" }
           if (-not $sharedDir) { throw "FFmpeg shared folder not found after extract" }
 
@@ -74,7 +90,7 @@ jobs:
           Write-Host "DEV libs:";    Get-ChildItem "$env:FFMPEG_DEV\lib" | Select-Object Name | Format-Table -AutoSize
           Write-Host "SHARED bins:"; Get-ChildItem "$env:FFMPEG_SHARED\bin" -Filter *.dll | Select-Object Name | Format-Table -AutoSize
 
-      # 如需修正 FindFFmpeg.cmake（把 av${lc} 改为 ${lc}），取消下面注释
+      # （可选）如果你的 FindFFmpeg.cmake 写了 av${lc} 而不是 ${lc}，可解开：
       # - name: Hotfix FindFFmpeg.cmake (fix library names)
       #   run: (Get-Content .\asciiplay\cmake\FindFFmpeg.cmake) -replace 'NAMES av\$\{lc\}','NAMES ${lc}' | Set-Content .\asciiplay\cmake\FindFFmpeg.cmake -Encoding UTF8
 
@@ -115,7 +131,7 @@ jobs:
           if (-not (Test-Path $exe)) { throw "asciiplay.exe not found at $exe" }
           Copy-Item $exe $bin
 
-          # 带上 FFmpeg 4.4.x 的运行时 DLL（来自 shared 包）
+          # 带上 FFmpeg 4.4.x 的运行时 DLL（shared 包）
           Copy-Item "$env:FFMPEG_SHARED\bin\*.dll" $bin -Force
 
           # 自检（无输入允许非零）
